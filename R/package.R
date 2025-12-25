@@ -112,6 +112,8 @@ vig_filter = function(ifile, encoding) {
 #' @param name The package name (by default, it is automatically detected from
 #'   the `DESCRIPTION` file if it exists in the current working directory or
 #'   upper-level directories).
+#' @param type The HTML tag for the description: `table` (`<table>` with `<tr>`
+#'   and `<td>`) or `dl` (definition list `<dl>` with `<dt>` and `<dd>`).
 #' @return A character vector (HTML or Markdown) that will be printed as is
 #'   inside a code chunk of an R Markdown document.
 #'
@@ -123,7 +125,7 @@ vig_filter = function(ifile, encoding) {
 #' litedown::pkg_news()
 #' litedown::pkg_citation()
 #' }
-pkg_desc = function(name = detect_pkg()) {
+pkg_desc = function(name = detect_pkg(), type = c('table', 'dl')) {
   fields = c(
     'Title', 'Version', 'Description', 'Depends', 'Imports', 'Suggests',
     'License', 'URL', 'BugReports', 'VignetteBuilder', 'Authors@R', 'Author'
@@ -146,12 +148,15 @@ pkg_desc = function(name = detect_pkg()) {
     } else html_escape(d[[i]])
   }
   d = unlist(d)
-  res = paste0(
-    '<table class="table-full"><tbody>\n', paste0(
-      '<tr>', paste0('\n<td>', names(d), '</td>'),
-      paste0('\n<td>', d, '</td>'), '\n</tr>', collapse = '\n'
-    ), '\n</tbody></table>'
-  )
+  res = one_string(switch(
+    type[1],
+    table = c(
+      '<table class="table-full"><tbody>',
+      sprintf('<tr>\n<td>%s</td>\n<td>%s</td>\n</tr>', names(d), d),
+      '</tbody></table>'
+    ),
+    dl = c('<dl class="pkg-desc">', sprintf('<dt>%s</dt>\n<dd>%s</dd>', names(d), d), '</dl>')
+  ))
 
   new_asis(c(res, vest(css = '@manual')))
 }
@@ -216,6 +221,16 @@ pkg_news = function(
     for (i in 2:1) res = sub(sprintf('^(#{%d} .+)', i), paste0('#\\1', a), res)
     # shorten headings
     res = gsub('^## CHANGES IN ([^ ]+) VERSION( .+)', '## \\1\\2', res)
+    # link Github @username and #issue
+    if (length(u <- github_link(dirname(path)))) {
+      r1 = '([[:alnum:]-]+)'; r2 = '([0-9]+)'
+      res = gsub(paste0(' @', r1), ' [@\\1](https://github.com/\\1)', res)
+      res = gsub(paste0(' #', r2), sprintf(' [#\\1](%sissues/\\1)', u), res)
+      res = gsub(
+        sprintf(' %s/%s#%s', r1, r1, r2),
+        ' [\\1/\\2#\\3](https://github.com/\\1/\\2/issues/\\3)', res
+      )
+    }
   }
   new_asis(res)
 }
@@ -245,13 +260,12 @@ pkg_code = function(
   path = attr(detect_pkg(), 'path'), pattern = '[.](R|c|h|f|cpp)$', toc = TRUE,
   number_sections = TRUE, link = TRUE
 ) {
-  if (!isTRUE(dir.exists(path))) return()
-  a = header_class(toc, number_sections)
-  if (isTRUE(link)) {
-    u = read.dcf(file.path(path, 'DESCRIPTION'), 'BugReports')[1, 1]
-    u = grep_sub('^(https://github.com/[^/]+/[^/]+/).*', '\\1blob/HEAD/%s', u)
-    if (length(u)) link = u
+  if (!isTRUE(dir.exists(path))) {
+    if (missing(path)) message('Please run this function in the package source directory.')
+    return()
   }
+  a = header_class(toc, number_sections)
+  if (isTRUE(link) && length(u <- github_link(path))) link = paste0(u, 'blob/HEAD/%s')
   ds = c('R', 'src')
   ds = ds[ds %in% list.dirs(path, FALSE, FALSE)]
   flat = length(ds) == 1  # if only one dir exists, list files in a flat structure
@@ -268,6 +282,12 @@ pkg_code = function(
     c(if (!flat) paste0('## ', paste0('`*.', e, '`', collapse = ' / '), a), '', x)
   }))
   new_asis(unlist(code))
+}
+
+# retrieve Github repo link from DESCRIPTION
+github_link = function(path) {
+  u = read.dcf(file.path(path, 'DESCRIPTION'), 'BugReports')[1, 1]
+  grep_sub('^(https://github.com/[^/]+/[^/]+/).*', '\\1', u)
 }
 
 #' @return `pkg_citation()` returns the package citation in both the plain-text
@@ -375,6 +395,9 @@ pkg_manual = function(
   res = gsub(r, '\\1https://rdrr.io/cran/\\2/man/', res)
   res = gsub(" (id|class)='([^']+)'", ' \\1="\\2"', res)  # ' -> "
   res = gsub('<h3>', '<h3 class="unnumbered unlisted">', res, fixed = TRUE)
+  res = match_replace(res, '<(h[1-6])[^>]*>(?s).+?</\\1>', function(x) {
+    gsub('\n', ' ', x)  # remove \n in headings so build_toc() can be correctly build TOC
+  })
   res = gsub('<code style="[^"]+">', '<code>', res)
   res = gsub('<code id="[^"]+">', '<code>', res)
   res = gsub('(<code[^>]*>)\\s+', '\\1', res)
@@ -384,7 +407,6 @@ pkg_manual = function(
   res = gsub('<code class="language-R"', '<code class="language-r"', res, fixed = TRUE)
   res = gsub('&#8288;', '', res, fixed = TRUE)
   res = gsub('<img src="../help/figures/', '<img src="man/figures/', res, fixed = TRUE)
-  res = gsub('<table>', '<table class="table-full">', res, fixed = TRUE)
   new_asis(c(toc, res, vest(css = '@manual')))
 }
 

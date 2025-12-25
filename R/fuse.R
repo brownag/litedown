@@ -412,10 +412,12 @@ block_order = function(res, N = length(res)) {
   order(x)
 }
 
-#' @description The function `fuse()` extracts and runs code from code chunks
-#'   and inline code expressions in R Markdown, and interweaves the results with
-#'   the rest of text in the input, which is similar to what `knitr::knit()` and
-#'   `rmarkdown::render()` do. It also works on R scripts in a way similar to
+#' @description The function `fuse()` runs code from code chunks and inline code
+#'   expressions in R Markdown, interweaves the results with the rest of text in
+#'   the input to intermediate Markdown output (which is similar to what
+#'   `knitr::knit()` does), and renders the Markdown output through `mark()` to
+#'   the final output format, such as HTML or LaTeX (similar to
+#'   `rmarkdown::render()`). It also works on R scripts in a way similar to
 #'   `knitr::spin()`. The function `fiss()` extracts code from the input, and is
 #'   similar to `knitr::purl()`.
 #' @rdname mark
@@ -426,6 +428,8 @@ block_order = function(res, N = length(res)) {
 #'   a global [option][options] `litedown.progress.delay` (the default is `2`).
 #'   THe progress bar output can be set via a global option
 #'   `litedown.progress.output` (the default is [stderr()]).
+#' @note For `fuse()`, you can generate the intermediate Markdown output via
+#'   `output = '.md'` or `output = 'markdown'` without further calling `mark()`.
 #' @seealso [sieve()], for the syntax of R scripts to be passed to [fuse()].
 #' @export
 #' @examples
@@ -511,9 +515,9 @@ fuse = function(input, output = NULL, text = NULL, envir = parent.frame(), quiet
   if (is_file(input) && is.null(opts$wd)) opts$wd = dirname(normalizePath(input))
 
   # store output dir so we can calculate relative paths for plot files later
-  .env$wd.out = normalize_path(
+  .env$wd_out = normalize_path(
     if (is.null(output_base)) {
-      if (is.character(.env$wd.out)) .env$wd.out else '.'
+      if (is.character(.env$wd_out)) .env$wd_out else '.'
     } else dirname(output_base)
   )
   # store the environment and output format
@@ -540,6 +544,7 @@ fuse = function(input, output = NULL, text = NULL, envir = parent.frame(), quiet
   set_path('fig.path'); set_path('cache.path')
 
   .env$input = input
+  if (is_file(input)) .env$full_input = normalizePath(input)
   res = .fuse(blocks, input, quiet)
 
   # save timing data if necessary
@@ -793,7 +798,7 @@ fuse_code = function(x, blocks) {
   p3 = unlist(p2)  # vector of plot paths
   # get the relative path of the plot directory
   fig.dir = if (length(p3)) tryCatch(
-    sub('^[.]/', '.', paste0(dirname(relative_path(p3[1], .env$wd.out)), '/')),
+    sub('^[.]/', '', paste0(dirname(relative_path(p3[1], .env$wd_out)), '/')),
     error = function(e) NULL
   )
 
@@ -820,6 +825,8 @@ fuse_code = function(x, blocks) {
   if (is.logical(res_show)) res_show = if (res_show) 'markup' else 'hide'
 
   l1 = x$code_start  # starting line number of the whole code chunk
+  # filter the results if desired
+  if (!is.null(opts$filter)) res = match.fun(opts$filter)(res)
   # generate markdown output
   out = lapply(res, function(x) {
     type = grep_sub('^record_', '', class(x))[1]
@@ -846,8 +853,8 @@ fuse_code = function(x, blocks) {
     } else {
       a = opts[[paste0('attr.', type)]]
       if (type == 'source') {
-        # use engine name as class name; when `a` contains class names, prefix language-
-        if (!any(grepl('(^| )[.]', a))) a = c(paste0('.',  lang), a)
+        # use engine name as class name when `a` is not provided
+        if (is.null(a)) a = paste0('.',  lang)
         # add line numbers
         if (is_roaming()) a = c(a, lineno_attr(NA, l1 + l2 - 1))
       } else {
@@ -867,9 +874,12 @@ fuse_code = function(x, blocks) {
       } else fenced_block(x, a, fence)
     }
   })
+  out = dropNULL(out)
 
   # collapse a code block without attributes into previous adjacent code block
-  if (isTRUE(opts$collapse) && (n <- length(res)) > 1) {
+  # (also try to collapse for results = 'hide')
+  collapse = isTRUE(opts$collapse) || res_show == 'hide'
+  if (collapse && (n <- length(out)) > 1) {
     i1 = 1; k = NULL  # indices of elements to be removed from `out`
     for (i in 2:n) {
       if (i - i1 > 1) i1 = i - 1  # make sure blocks are adjacent
@@ -978,7 +988,9 @@ continue_block = function(e1_open, e1_end, e2) {
   if (length(e2) != 2 || e2[1] != '') return(FALSE)
   if ((e2_open <- e2[2]) == e1_end) return(TRUE)
   e3 = sub(' data-start="[0-9]+"', '', c(e1_open, e2_open))
-  e3[1] == e3[2]
+  if (e3[1] == e3[2]) return(TRUE)
+  # remove attributes of message blocks and see if they can be collapsed
+  sub(' \\{[.]plain [.](message|warning|error)}', '', e2_open) == e1_end
 }
 
 new_source = function(x) {
@@ -991,6 +1003,28 @@ new_plot = function(x) new_record(x, 'plot')
 new_asis = function(x, raw = FALSE) {
   res = new_record(x, 'asis')
   if (raw) raw_string(res) else res
+}
+
+# interleave text and plot output, e.g., t t t p p p -> t p t p t p, or t t t t
+# p p -> t t p t t p
+interleave = function(res) {
+  p = match(c('record_output', 'record_plot'), sapply(res, function(x) class(x)[1]))
+  if (any(is.na(p))) {
+    warning('Both text and plot output must be present in results to be interleaved.')
+    return(res)
+  }
+  x1 = res[[p[1]]]; n1 = length(x1)
+  x2 = res[[p[2]]]; n2 = length(x2)
+  n = n1 / n2
+  if (n < 1) return(res)
+  if (n1 %% n2 != 0) stop(
+    'Length of text output (', n1, ') is not multiple of the number of plots (', n2, ').'
+  )
+  # interleave text and plot output: one (chunk of) text followed by one plot
+  mix = unlist(lapply(seq_len(n2), function(i) {
+    list(new_output(x1[(i - 1) * n + 1:n]), new_plot(x2[i]))
+  }), recursive = FALSE)
+  append(res[-p], mix, p[1] - 1)
 }
 
 #' Mark a character vector as raw output
@@ -1140,7 +1174,7 @@ reactor(
   attr.source = NULL, attr.output = NULL, attr.plot = NULL, attr.chunk = NULL,
   attr.message = '.plain .message', attr.warning = '.plain .warning', attr.error = '.plain .error',
   cache = FALSE, cache.path = NULL,
-  dev = NULL, dev.args = NULL, fig.path = NULL, fig.ext = NULL,
+  dev = NULL, dev.args = NULL, fig.path = NULL, fig.ext = NULL, fig.keep = TRUE,
   fig.width = 7, fig.height = 7, fig.dim = NULL, fig.cap = NULL, fig.alt = NULL, fig.env = '.figure',
   tab.cap = NULL, tab.env = '.table', cap.pos = NULL,
   print = NULL, print.args = NULL, time = FALSE,
@@ -1164,7 +1198,7 @@ eng_r = function(x, inline = FALSE, ...) {
     return(fmt_inline(res, x$math))
   }
   args = reactor(
-    'fig.path', 'fig.ext', 'dev', 'dev.args', 'message', 'warning', 'error',
+    'fig.path', 'fig.ext', 'fig.keep', 'dev', 'dev.args', 'message', 'warning', 'error',
     'cache', 'print', 'print.args', 'verbose'
   )
   if (is.character(args$fig.path)) args$fig.path = paste0(args$fig.path, opts$label)
@@ -1172,7 +1206,7 @@ eng_r = function(x, inline = FALSE, ...) {
   # if fig.dim is provided, override fig.width and fig.height
   if (length(dm <- opts$fig.dim) == 2) size[] = as.list(dm)
   # map chunk options to record() argument names
-  names(args)[1:2] = c('dev.path', 'dev.ext')
+  names(args)[1:3] = c('dev.path', 'dev.ext', 'dev.keep')
   args = dropNULL(args)
   args$dev.args = merge_list(size, opts$dev.args)
   args$cache = list(

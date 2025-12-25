@@ -1,8 +1,50 @@
+# CHANGES IN litedown VERSION 0.10
+
+- When the `output` argument of `mark()` is a `.pdf` file, Markdown will be converted to a full `.tex` file instead of a LaTeX fragment before it is compiled to PDF.
+
+- Fixed a bug that sections in the appendix could not be cross-referenced.
+
+# CHANGES IN litedown VERSION 0.9
+
+- Provided [a new chunk option `filter`](https://yihui.org/litedown/#sec:option-filter) to filter the output elements via a custom function. This makes it possible to re-order output elements. As a result, text output and plots from a `for`-loop can be interleaved (thanks, @reedacartwright, #106).
+
+- The chunk option `attr.source` will default to `.lang` (where `lang` is the engine name) only when it is not provided, i.e., `NULL`. Previously the value `.lang` would still be used when `attr.source` has been provided. Now it's possible to completely override it, e.g., `attr.source = 'language-r'` as in #107 (thanks, @ThomasSoeiro).
+
+- The chunk option `collapse = TRUE` also applies to message blocks, including warnings, messages, and errors (thanks, @ThomasSoeiro, #108).
+
+- `pkg_desc()` gained a new argument `type` and the package description can be generated to either a table or a definition list now.
+
+- The `embed_resources` option was buggy for deferred JS resources. Previously they were moved to `<head>`, but deferred scripts should be executed after the full DOM is ready, so they are moved before `</body>` instead if they are to be embedded.
+
+- Fixed a bug in `pkg_manual()` that may lead to omission of certain items when building TOC.
+
+# CHANGES IN litedown VERSION 0.8
+
+- Added a new chunk option `fig.keep` to select plots to be kept in a code chunk (thanks, @Gabrielforest, #99). See https://yihui.org/litedown/#sec:option-fig for documentation.
+
+- Improved support for LaTeX footnotes. The footnote identifier no longer has to be a number, and the footnote can include arbitrary elements (not necessarily a single paragraph).
+
+- The chunk option `results = 'hide'` will imply `collapse = TRUE`, i.e., when text output is hidden, the source blocks will be merged (thanks, @jangorecki, #87). 
+
+- `fuse(text = '# text')` will be treated as Markdown input instead of R code input (thanks, @chuxinyuan, #102).
+
+- Fixed the bug that the chunk option `fig.path` does not work when it does not contain `/` (thanks, @J-Moravec, #88).
+
+- `get_context('full_input')` gives the full path to the input file of `fuse()` (thanks, @rikivillalba, #104).
+
 # CHANGES IN litedown VERSION 0.7
 
 - `pkg_manual()` will exclude help pages with the keyword `internal` (thanks, @TimTaylor, #78).
 
+- `pkg_news()` will add links to Github users and issue numbers if the package is hosted on Github.
+
+- Allow `,` and `.` in superscripts and subscripts (thanks, @janlisec, #81).
+
+- Special characters in bibliography entries such as `{\"u}` can be correctly read now (thanks, @bastistician).
+
 - Fixed a bug that inline code expressions (`` `{lang} expr` ``) cannot be correctly located when the line has leading spaces that are not meaningful.
+
+- Deleted vignettes `markdown-examples` and `markdown-output`. They are rendered on the package site now: https://git.yihui.org/litedown/examples/test-options.html
 
 # CHANGES IN litedown VERSION 0.6
 

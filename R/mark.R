@@ -19,10 +19,10 @@
 #'   a file path, the output file path will have the same base name as the input
 #'   file, with an extension corresponding to the output format. The output
 #'   format is retrieved from the first value in the `output` field of the YAML
-#'   metadata of the `input` (e.g., `html` will generate HTML
-#'   output). The `output` argument can also take an output format name
-#'   (possible values are `html`, `latex`, `xml`, `man`, `commonmark`, and
-#'   `text`). If no output format is detected or provided, the default is HTML.
+#'   metadata of the `input` (e.g., `html` will generate HTML output). The
+#'   `output` argument can also take an output format name (possible values are
+#'   `html`, `latex`, `xml`, `man`, `commonmark`, and `text`). If no output
+#'   format is detected or provided, the default is HTML.
 #' @param text A character vector as the text input. By default, it is read from
 #'   the `input` file if provided.
 #' @param options Options to be passed to the renderer. See [markdown_options()]
@@ -95,6 +95,11 @@ mark = function(input, output = NULL, text = NULL, options = NULL, meta = list()
     names(Filter(isTRUE, options)), commonmark::list_extensions()
   )
 
+  # build PDF for LaTeX output when the output file is .pdf or latex_engine is specified
+  is_pdf = is_output_file(output) && format == 'latex' &&
+    (is.character(latex_engine <- yaml_field(yaml, format, 'latex_engine')) ||
+       file_ext(output) == 'pdf')
+
   # whether to write YAML metadata to output
   keep_yaml = isTRUE(options[['keep_yaml']])
 
@@ -105,7 +110,7 @@ mark = function(input, output = NULL, text = NULL, options = NULL, meta = list()
   # if not set there, check global option; if not set, disable template if no
   # YAML was provided (i.e., generate a fragment)
   if (is.null(template))
-    template = get_option('template', format, full || 'yaml' %in% names(part))
+    template = get_option('template', format, full || 'yaml' %in% names(part) || is_pdf)
   # template = FALSE means no template; other values mean the default template
   if (!is.character(template)) template = if (!isFALSE(template))
     pkg_file('resources', sprintf('litedown.%s', format))
@@ -158,7 +163,7 @@ mark = function(input, output = NULL, text = NULL, options = NULL, meta = list()
   })
   # superscript and subscript; for now, we allow only characters alnum|*|(|) for
   # script text but can consider changing this rule upon users' request
-  r2 = '(?<!`)\\^([[:alnum:]*()]+?)\\^(?!`)'
+  r2 = '(?<!`)\\^([[:alnum:]*(),.]+?)\\^(?!`)'
   if (has_sup <- test_feature('superscript', r2)) {
     id2 = id_string(text)
     find_prose()
@@ -168,7 +173,7 @@ mark = function(input, output = NULL, text = NULL, options = NULL, meta = list()
       sprintf('!%s!', x)
     })
   }
-  r3 = '(?<![~`[:space:]])~([[:alnum:]*()]+?)~(?!`)'
+  r3 = '(?<![~`[:space:]])~([[:alnum:]*(),.]+?)~(?!`)'
   if (has_sub <- test_feature('subscript', r3)) {
     id3 = id_string(text)
     find_prose()
@@ -298,7 +303,7 @@ mark = function(input, output = NULL, text = NULL, options = NULL, meta = list()
     # number figures and tables, etc.
     ret = number_refs(ret, r_ref, is_katex)
   } else if (format == 'latex') {
-    ret = render_footnotes(ret)  # render [^n] footnotes
+    if (isTRUE(options[['footnotes']])) ret = fix_footnotes(ret)  # fix footnotes
     if (has_sup)
       ret = gsub(sprintf('!%s(.+?)%s!', id2, id2), '\\\\textsuperscript{\\1}', ret)
     if (has_sub)
@@ -317,6 +322,8 @@ mark = function(input, output = NULL, text = NULL, options = NULL, meta = list()
       x = gsub(r4, '\\1\\3\\4', x)
       x
     }, perl = FALSE)
+    # for nested verbatim code blocks, the inner blocks may have leftover ```\nid4
+    ret = gsub(sprintf('(```)\n%s(.*?)%s', id4, id4), '\\1\\2', ret)
     # fix horizontal rules from --- (\linethickness doesn't work)
     ret = gsub('{\\linethickness}', '{1pt}', ret, fixed = TRUE)
     ret = redefine_level(ret, options[['top_level']])
@@ -397,26 +404,20 @@ mark = function(input, output = NULL, text = NULL, options = NULL, meta = list()
 
   ret = sub('\n$', '', ret)
   if (is_output_file(output)) {
-    # build PDF for LaTeX output when the output file is .pdf
-    is_pdf = FALSE
-    if (format == 'latex') {
-      latex_engine = yaml_field(yaml, format, 'latex_engine')
-      if (is.character(latex_engine) || file_ext(output) == 'pdf') {
-        is_pdf = TRUE
-        tex = with_ext(output, '.tex')
-        if (!isTRUE(yaml_field(yaml, format, 'keep_tex')))
-          on.exit(file.remove(tex), add = TRUE)
-        write_utf8(ret, tex)
-        output = tinytex::latexmk(
-          tex, latex_engine %||% 'xelatex',
-          if (pkg_cite == 'biblatex') 'biber' else 'bibtex'
-        )
-      }
+    if (is_pdf) {
+      tex = with_ext(output, '.tex')
+      if (!isTRUE(yaml_field(yaml, format, 'keep_tex')))
+        on.exit(file.remove(tex), add = TRUE)
+      write_utf8(ret, tex)
+      output = tinytex::latexmk(
+        tex, latex_engine %||% 'xelatex',
+        if (pkg_cite == 'biblatex') 'biber' else 'bibtex'
+      )
     }
     # for RStudio to capture the output path when previewing the output
     if (is_rmd_preview()) message('\nOutput created: ', output)
     if (is_pdf) invisible(output) else write_utf8(ret, output)
-  } else raw_string(ret, lang = format)
+  } else raw_string(ret, lang = paste0('.', format))
 }
 
 # insert body and meta variables into a template
@@ -470,12 +471,10 @@ yaml_text = function(part, text) if (length(l <- part$lines) == 2) text[l[1]:l[2
 #' @examples
 #' # all available options
 #' litedown::markdown_options()
-#'
-#' @example inst/examples/render-options.R
 markdown_options = function() {
   # options enabled by default
   x1 = c(
-    'smart', 'embed_resources', 'embed_cleanup', 'js_math', 'js_highlight',
+    'smart', 'embed_resources', 'embed_cleanup', 'js_math', 'js_highlight', 'footnotes',
     'superscript', 'subscript', 'latex_math', 'auto_identifiers', 'cross_refs',
     setdiff(commonmark::list_extensions(), 'tagfilter')
   )

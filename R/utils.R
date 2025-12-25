@@ -40,11 +40,7 @@ sans_yaml = function(x) {
   x
 }
 
-# TODO: remove `if` after xfun 0.52
-split_chunk = function(...) {
-  f = xfun::divide_chunk
-  if ('...' %in% names(formals(f))) f(..., use_yaml = FALSE) else f(...)
-}
+split_chunk = function(...) xfun::divide_chunk(..., use_yaml = FALSE)
 
 is_lang = function(x) is.symbol(x) || is.language(x)
 
@@ -167,7 +163,9 @@ is_output_full = function(x) isTRUE(attr(x, 'full'))
 # test if input is R code or not (this is based on heuristics and may not be robust)
 is_R = function(input, text) {
   if (is_file(input)) grepl('[.][Rrs]$', input) else {
-    !length(grep('^\\s*```+\\{', text)) && !try_error(parse_only(text))
+    # if R code, it must not contain ```{, be syntactically valid, and contain
+    # at least one expression (i.e., not all comments)
+    !length(grep('^\\s*```+\\{', text)) && !try_error(res <- parse_only(text)) && length(res)
   }
 }
 
@@ -512,7 +510,7 @@ one_string = function(x, by = '\n', test = NULL) {
 # find @citation and resolve references
 add_citation = function(x, bib, format = 'html') {
   if (!format %in% c('html', 'latex')) return(x)
-  bib = do.call(c, lapply(bib, rbibutils::readBib, texChars = 'convert'))
+  bib = do.call(c, lapply(bib, rbibutils::readBib, direct = TRUE, texChars = 'convert'))
   if (length(bib) == 0) return(x)
   cited = NULL
   is_html = format == 'html'
@@ -787,18 +785,20 @@ latex_envir = function(x, env = NULL) {
   c(if (x1 == '') paste0('\\end', env2) else paste0('\\begin', x1), latex_envir(x[-1], env))
 }
 
-# find and render footnotes for LaTeX output
-render_footnotes = function(x) {
+# fix footnotes for LaTeX output: convert `\footnotemark[1] \footnotetext[1]{*}`
+# to `\footnote{*}` (see r-lib/commonmark#32)
+fix_footnotes = function(x) {
   f1 = f2 = NULL
-  # [^1] is converted to {[}\^{}1{]}
-  r = '(\n\n)(\\{\\[}\\\\\\^\\{}[0-9]+\\{\\]}): (.*?)\n(\n|$)'
+  r = '\n\\\\footnotetext\\[(.+?)]\\{(.+?)\n\n}\n'
   x = match_replace(x, r, function(z) {
-    f1 <<- c(f1, sub(r, '\\2', z))
-    f2 <<- c(f2, sub(r, '\\3', z))
-    gsub(r, '\\1', z)
+    f1 <<- c(f1, sub(r, '\\1', z))
+    f2 <<- c(f2, sub(r, '\\2', z))
+    ''
   }, perl = FALSE)
+  f1 = sprintf('\\footnotemark[%s]', f1)
+  f2 = sprintf('\\footnote{%s}', f2)
   for (i in seq_along(f1)) {
-    x = sub(f1[i], sprintf('\\footnote{%s}', f2[i]), x, fixed = TRUE)
+    x = sub(f1[i], f2[i], x, fixed = TRUE)
   }
   x
 }
@@ -906,7 +906,7 @@ number_refs = function(x, r, katex = TRUE) {
   db = list()  # element numbers
 
   # first, find numbered section headings
-  r2 = '<h[1-6][^>]*? id="([^"]+)"[^>]*><span class="section-number[^"]*">([0-9.]+)</span>'
+  r2 = '<h[1-6][^>]*? id="([^"]+)"[^>]*><span class="section-number[^"]*">([A-Z0-9.]+)</span>'
   m = match_all(x, r2)[[1]]
   if (length(m)) {
     ids = m[2, ]
@@ -980,25 +980,11 @@ latex_refs = function(x, r, clever = FALSE) {
 embed_resources = function(x, options) {
   if (length(x) == 0) return(x)
   r = '\n<link[^>]*? rel="stylesheet" [^>]*>|\n<script[^>]*? src="[^"]+"[^>]*>\\s*</script>'
-  x2 = NULL  # to be appended to <head>
   x = match_replace(x, r, function(z) {
     # de-dup assets (e.g., when vest() is called multiple times on the same asset)
     z[duplicated(z)] = ''
-    i = grep(' defer(>| ).*</script>$', z)
-    x2 <<- c(x2, z[i])
-    z[i] = ''
     z
   })
-  # move deferred scripts to the end of <head>
-  if (length(x2)) {
-    x = if (length(grep('</head>', x)) != 1) {
-      one_string(c(x2, x))
-    } else {
-      match_replace(x, '</head>', fixed = TRUE, perl = FALSE, function(z) {
-        one_string(c(x2, z))
-      })
-    }
-  }
 
   embed = c('https', 'local') %in% options[['embed_resources']]
   offline = options[['offline']]
@@ -1040,19 +1026,33 @@ embed_resources = function(x, options) {
     '<link[^>]*? rel="stylesheet" href="([^"]+)"[^>]*>|',
     '<script([^>]*?) src="([^"]+)"([^>]*)>\\s*</script>'
   )
-  match_replace(x, r, function(z) {
+  x2 = NULL  # js to be appended before </body>
+  x = match_replace(x, r, function(z) {
     z1 = sub(r, '\\1', z)  # css
     z2 = sub(r, '\\3', z)  # js
     js = z2 != ''
     z3 = paste0(z1, z2)
+    at = sub(r, '\\2\\4', z)  # attributes for js
     # skip resources already base64 encoded
     i1 = !grepl('^data:.+;base64,.+', z3)
     z3[i1] = gen_tags(
-      z3[i1], ifelse(js[i1], 'js', 'css'), embed[1], embed[2], offline,
-      sub(r, '\\2\\4', z)  # attributes for js
+      z3[i1], ifelse(js[i1], 'js', 'css'), embed[1], embed[2], offline, at
     )
+    # js with the defer attribute and has been embedded (i.e., no src attribute)
+    i = grepl(' defer($| )', at) & !grepl('^<script([^>]*?) src="', z3) & i1
+    x2 <<- c(x2, z3[i])
+    z3[i] = ''
     z3
   })
+  # move deferred scripts to the end of <body>
+  if (length(x2)) {
+    x = if (length(grep('</body>', x)) != 1) {
+      one_string(c(x, x2))
+    } else {
+      sub('</body>', one_string(c(x2, '</body>')), x, fixed = TRUE)
+    }
+  }
+  x
 }
 
 # remove the xml/doctype declaration in svg, and add attributes
@@ -1082,8 +1082,6 @@ normalize_options = function(x, format = 'html') {
   if (!is.character(o)) o = FALSE
   d$offline = o
   d = normalize_embed(d)
-  # TODO: fully enable footnotes https://github.com/github/cmark-gfm/issues/314
-  if (format == 'html' && !is.logical(d[['footnotes']])) d$footnotes = TRUE
   d
 }
 
@@ -1361,11 +1359,11 @@ resolve_url = function(url, code, ext, encode = TRUE) {
   }
   # find `attr: url(resource)` and embed url resources in CSS
   if (ext == 'css') {
-    r = '(: ?url\\(["\']?)([^"\')]+)(["\']?\\))'
-    code = match_replace(code, r, function(z) {
+    r = '((: ?| )url\\(["\']?)([^"\')]+)(["\']?\\))'
+    code = match_replace(code, paste0('(?<!behavior)', r), function(z) {
       z1 = gsub(r, '\\1', z)
-      z2 = gsub(r, '\\2', z)
-      z3 = gsub(r, '\\3', z)
+      z2 = gsub(r, '\\3', z)
+      z3 = gsub(r, '\\4', z)
       i = is_https(z2)
       u = ifelse(i, z2, sprintf('%s/%s', d, z2))
       z2 = unlist(if (encode) {
@@ -1377,6 +1375,10 @@ resolve_url = function(url, code, ext, encode = TRUE) {
       })
       paste0(z1, z2, z3)
     })
+  } else if (ext == 'js') {
+    # the literal sequence '</script>' inside <script> tag needs to be escaped;
+    # to avoid problems in general caused by closing tags, we escape them all
+    code = gsub('</', '<\\/', code, fixed = TRUE)
   }
   code
 }
